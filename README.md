@@ -8,16 +8,16 @@
 
 ## Contents
 - ### Lab 2: Raft
-    - #### 优化一：利用`sync.Cond`，将`applyLog`方法由轮询改为条件变量等待
-    - #### 优化二：利用计时器，更严格地控制`leader`发送`heartbeat`和`follower`开始`election`的间隔
-    - #### 优化三：利用公平锁机制，在`InstallSnapshot`方法里直接安装`snapshot`，`CondInstallSnapshot`方法永远返回`true`
+  - #### [优化一：利用sync.Cond，将applyLog方法由轮询改为条件变量等待](https://github.com/chong-chonga/6.824labs-note-Spring2021/blob/master/note/raft.md#%E8%B0%88%E8%B0%88raft%E8%AF%A5%E5%A6%82%E4%BD%95%E5%B0%86log%E5%92%8Csnapshot%E5%8F%91%E9%80%81%E7%BB%99%E4%B8%8A%E5%B1%82service)
+  - #### 优化二：利用计时器，更严格地控制`leader`发送`heartbeat`和`follower`开始`election`的间隔
+  - #### [优化三：利用公平锁机制，在InstallSnapshot方法里直接安装snapshot，CondInstallSnapshot方法永远返回true](https://github.com/chong-chonga/6.824labs-note-Spring2021/blob/master/note/raft.md#%E4%B8%BA%E4%BB%80%E4%B9%88%E9%9C%80%E8%A6%81condinstallsnapshot)
 - ### Lab 3: Fault-tolerant Key/Value Service
-    - #### 思考1：server如何知晓命令已经达成共识？
-    - #### 思考2：多个client提交raft的命令得到的`commandIndex`在什么情况下会相同？
+  - #### 思考1：server如何知晓命令已经达成共识？
+  - #### 思考2：多个client提交raft的命令得到的`commandIndex`在什么情况下会相同？
 - ### lab的题外话
-    - #### 1：server是否需要进行重复命令的检测？
-    - #### 2：server如何生成唯一的分布式标识？
-    - #### 3: 代码如何更简洁？
+  - #### 1：server是否需要进行重复命令的检测？
+  - #### 2：server如何生成唯一的分布式标识？
+  - #### 3: 代码如何更简洁？
 
 ## Maintainers
 [@Yoimbi](https://github.com/chong-chonga)
