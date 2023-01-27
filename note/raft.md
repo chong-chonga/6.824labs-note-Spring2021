@@ -14,8 +14,8 @@
 1. **嵌入式**：将 发送 log 的代码插入到上述两种情况中。 好处是可以及时地将 log 发送给 service，且不需要轮询，节省性能（类似于事件驱动、中断）。
 坏处就是阻塞，当前 go routine 需要等待所有 log 发送完成后才能继续执行，延长了rpc执行时间。
 2. **独立式**： 将 发送 log 的代码作为一个单独的 go routine，通过轮询的方式来判断是否要发送 log。 好处是代码逻辑独立，降低了耦合，且不容易引发死锁。
-坏处就是需要轮询，降低了性能，轮询的间隔时间既不能太大，也不能太小；且发送 log 时，由于占用锁，也会导致其他 go routine 阻塞。但是这种情况可以用如下形式的代码
-优化：
+坏处就是需要轮询，降低了性能，轮询的间隔时间既不能太大，也不能太小。但是这种情况可以改为使用**条件变量**（go语言中的`sync.Cond`）进行优化。
+因此`applyLog`方法可能长这样：
 ```go
     // raft 初始化时，加入如下字段并初始化
     rf.cond := sync.NewCond(&rf.mu)
@@ -46,7 +46,7 @@
 #### 其他优化
 考虑到原方案使用的阻塞式的`channel`，raft发送server需要等待service接收后，才能继续后面的处理。因此可以采用缓冲式的channel来提高raft处理的速度。
 
-#### 向channel一次发送1个log还是多个log？
+#### lab之外的思考：向channel一次发送1个log还是多个log？
 不管是选用上述哪一种方案，都是在持有锁的情况下，才会发送log，而持有锁的时间与处理log的时间成正比，因此还需要考虑一次发送的 log 数量。
 以第二种方案举例，有三种实现方式：
 1. 每次轮询时，至多发送1个log。这样做的好处是单次处理时间较短，持有锁的时间也比较短；坏处就是处理log比较慢，而如果要加快速度，则轮询间隔要更小，那么抢锁次数就会增多，加大了抢锁开销，
@@ -178,7 +178,29 @@ func1 () {
 ```
 发送log和发送snapshot是互斥的，后送的log/snapshot肯定要比前发送的log/snapshot要新，如此一来，`InstallSnapshot` 向channel发送的snapshot必定是比先前发送的log要新，
 且log和snapshot是串行发送的；所以 当service收到snapshot时 可以直接安装snapshot，而不需要调用`CondInstallSnapshot`（直接返回true）即可。
-我的raft负责发送log的函数如下：
+在raft类中添加几个字段，并在初始化时设置这些字段即可：
+```go
+type Raft struct {
+    //...
+    sendOrderCond *sync.Cond // condition for sendOrder
+    sendOrder     int64      // which order can send log/snapshot to applyCh
+    nextOrder     int64      // the next order a go routine will get
+    
+    applyCond *sync.Cond
+    applyCh   chan ApplyMsg // for raft to send committed log and snapshot
+    
+	//...
+}
+func Make(...) *Raft {
+	//...
+	rf.applyCond = sync.NewCond(&rf.mu)
+    rf.sendOrder = 0
+    rf.nextOrder = 0
+    rf.sendOrderCond = sync.NewCond(&sync.Mutex{})
+	//...
+}
+```
+最终的`applyLog`方法如下：
 ```go
 // applyLog
 // a go routine to send committed logs to applyCh
@@ -229,9 +251,22 @@ func (rf *Raft) applyLog() {
 ```
 
 #### 最终结果
-经过数十次测试raft&kvraft均通过，且不再打印上述日志，说明成功了！
-![img_2.png](img_2.png)
-![img_3.png](img_3.png)
+使用以下测试脚本（testFull.sh)：
+```bash
+#!/bin/bash
+for i in {1..50} ; do
+    go test -race
+    cd ../kvraft
+    go test -race
+    cd ../raft
+done
+```
+将结果导入到`result.txt`得到测试结果
+```bash
+./testFull.sh > result.txt
+```
+在测试了几个小时之后，我终止了测试，无一FAIL，且不再出现上述日志，说明该方案可行。
+
 
 
 
