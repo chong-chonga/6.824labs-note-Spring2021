@@ -8,9 +8,9 @@
 
 ## Contents
 - ### Lab 2: Raft
-  - #### [优化一：利用sync.Cond，将applyLog方法由轮询改为条件变量等待](https://github.com/chong-chonga/6.824labs-note-Spring2021/blob/master/note/raft.md#%E8%B0%88%E8%B0%88raft%E8%AF%A5%E5%A6%82%E4%BD%95%E5%B0%86log%E5%92%8Csnapshot%E5%8F%91%E9%80%81%E7%BB%99%E4%B8%8A%E5%B1%82service)
-  - #### 优化二：利用计时器，更严格地控制`leader`发送`heartbeat`和`follower`开始`election`的间隔
-  - #### [优化三：利用公平锁机制，在InstallSnapshot方法里直接安装snapshot，CondInstallSnapshot方法永远返回true](https://github.com/chong-chonga/6.824labs-note-Spring2021/blob/master/note/raft.md#%E4%B8%BA%E4%BB%80%E4%B9%88%E9%9C%80%E8%A6%81condinstallsnapshot)
+  - #### [优化一：利用sync.Cond，将applyLog方法由轮询改为条件变量等待](https://github.com/chong-chonga/6.824labs-note-Spring2021/blob/master/note/raft.md#raft%E5%BA%94%E8%AF%A5%E6%80%8E%E6%A0%B7%E5%90%91%E4%B8%8A%E5%B1%82%E7%9A%84service%E5%8F%91%E9%80%81log)
+  - #### [优化二：利用公平锁机制，在InstallSnapshot方法里直接安装snapshot，CondInstallSnapshot方法永远返回true](https://github.com/chong-chonga/6.824labs-note-Spring2021/blob/master/note/raft.md#%E4%B8%BA%E4%BB%80%E4%B9%88%E9%9C%80%E8%A6%81condinstallsnapshot)
+  - #### [优化三：利用计时器，更严格地控制leader发送heartbeat和follower开始election的间隔](https://github.com/chong-chonga/6.824labs-note-Spring2021/blob/master/note/raft.md#%E8%B0%88%E8%B0%88leader%E5%8F%91%E9%80%81heartbeat%E7%9A%84%E4%BC%98%E5%8C%96)
 - ### Lab 3: Fault-tolerant Key/Value Service
   - #### 思考1：server如何知晓命令已经达成共识？
   - #### 思考2：多个client提交raft的命令得到的`commandIndex`在什么情况下会相同？
