@@ -1,10 +1,10 @@
-## 谈谈raft该如何将log和snapshot发送给上层service
-读完raft论文后，对整个算法有了比较清晰的认识；但是论文对具体的实现没有讲得很仔细。
+# 实现Raft过程中的一些策略问题
+读完raft论文后，对共识算法有了比较清晰的认识；但是论文对具体的实现没有讲得很仔细。
 因此在实现Raft过程中，出现的很多问题都是策略问题，而不是机制问题。正是因为有很多可选的实现方案，所以非常让人纠结该选何种实现方式。
 举个最简单的例子：大家都知道到达罗马（机制），坐车还是坐飞机，沿途风景如何，乘坐感受如何等等（策略本身的影响）非常让人纠结。
-下面则是我在实现Raft过程中的一些思考。
+正如英语里的how(机制)和which(策略)一样。 下面则是我在实现Raft过程中的一些思考。
 
-### raft应该怎样向上层的service发送log?
+## raft应该怎样向上层的service发送log?
 阅读raft论文可知，raft 需要将 committed log 通过 channel 发送给上层的 service。
 因此，raft发送log就是在更新`commitIndex`后 ，而只有在以下两种情况中才会更新`commitIndex`：
 - follower 收到来自 leader `AppendEntries` RPC调用更新 `commitIndex` 时
@@ -41,26 +41,47 @@
 	}
 ```
 
+在上述两种更新`commitIndex`的情况中，插入`rf.applyCond.Signal()`代码，即可通知`applyLog`发送log：
+```go
+func (rf *Raft) AppendEntries(args *AppendEntriesArgs, reply *AppendEntriesReply) {
+	//...
+	// If leaderCommit > commitIndex, set commitIndex = min(leaderCommit, index of last new entry)
+	if args.LeaderCommit > rf.commitIndex {
+        maxLogIndex := rf.lastIncludedIndex + len(rf.log)
+        if args.LeaderCommit < maxLogIndex {
+            rf.commitIndex = args.LeaderCommit
+        } else {
+            rf.commitIndex = maxLogIndex
+        }
+        rf.applyCond.Signal()
+    }
+	//...
+}
+
+// 第二种情况：leader 向 follower 发送 AppendEntries RPC 后，更新 commitIndex 时，也要调用 rf.applyCond.Signal()
+// 具体代码和实现有关，这里就不演示了
+```
+
 我选择的是第二种方案，即使用单独的 go routine 来发送 log，因为修改很方便。
 
-#### 其他优化
+### 其他优化
 考虑到原方案使用的阻塞式的`channel`，raft发送server需要等待service接收后，才能继续后面的处理。因此可以采用缓冲式的channel来提高raft处理的速度。
 
-#### lab之外的思考：向channel一次发送1个log还是多个log？
+### lab之外的思考：向channel一次发送1个log还是多个log？
 不管是选用上述哪一种方案，都是在持有锁的情况下，才会发送log，而持有锁的时间与处理log的时间成正比，因此还需要考虑一次发送的 log 数量。
 以第二种方案举例，有三种实现方式：
 1. 每次轮询时，至多发送1个log。这样做的好处是单次处理时间较短，持有锁的时间也比较短；坏处就是处理log比较慢，而如果要加快速度，则轮询间隔要更小，那么抢锁次数就会增多，加大了抢锁开销，
 2. 每次轮询时，尽量发送更多log。好处是一次持有锁的时间可以完成多个log，处理log比较快；坏处就是，其他 go routine 等待锁的时间与处理log时间成正比。
 3. 6.824提供的每次轮询时，每次向channel发送log数组，而不是单个log。好处是，向channel发送一次即可处理多个log。
 
-### 为什么需要CondInstallSnapshot？
+## 为什么需要CondInstallSnapshot？
 你可能好奇过raft为什么处理snapshot要靠依靠`CondInstallSnapshot`，你可能去问过搜索引擎，很多人告诉你原因是确保service和raft安装snapshot的原子性。
 这个问题其实就是：发送log/snapshot时该不该持有全局锁。很多文章说的没错，持有锁时，能够保证发送log/snapshot是串行的；但会造成死锁；
 不持有锁，则发送log和snapshot是并发的，所以需要`CondInstallSnapshot`避免service收到过时的snapshot即可。
 前半句是对的，后半句不对。只是简单地不持有锁，然后靠着`CondInstallSnapshot`就能实现service和raft安装snapshot的原子性吗？答案是，并不能。
 
 现在来仔细思考一下这两种情况。
-#### 发送log/snapshot时持有锁
+### 发送log/snapshot时持有锁
 已经知晓死锁的，可以跳过本部分
 
 假如发送log的go routine全程是持有锁的，那么发送snapshot和发送log是串行的，service就无需过滤过时的log了。为了让raft能及时的释放锁，
@@ -93,7 +114,7 @@ service应当持续地接收channel中的消息，也就是说，service接收ch
 测试代码是等待`CondInstallSnapshot`完成，再去处理后续的log。因此我们必须在发送log和snapshot时，不持有锁。
 
 
-#### 发送log/snapshot时不持有锁：
+### 发送log/snapshot时不持有锁：
 假设发送log的go routine处理顺序：抢锁->获取要发送的log->更新`lastApplied`->释放锁->向channel发送log
 `InstallSnapshot`handler处理顺序：抢锁->`lastIncludedIndex of snapshot > lastApplied && lastIncludedIndex of snapshot > rf.lastIncludedIndex`
 ->如果为真，更新`rf.lastIncludedIndex = lastIncludedIndex of snapshot`->向channel发送snapshot(可以先释放锁再发送)->...
@@ -140,28 +161,30 @@ func (kv *KVServer) startApply() {
 }
 ```
 测试结果如下：
+
 ![img_1.png](img_1.png)
+
 即使通过了测试，但打印的日志也表明，raft存在上述提到的问题，但由于service将过时的log被当成重复的请求而过滤了，才没有影响测试结果。
 如果上层的service没有这种机制，则service会出问题。
 
-#### 如何解决
-持有锁能保证串行发送，但又偏离了原来的设计；不持有锁，则raft存在问题。其实，这个问题的存在有一个前提：
-**只为Raft使用一把大锁**。仔细思考就会发现：**发送log、snapshot和处理其他RPC调用其实并不冲突**，不需要锁。实际开发中，我们也往往会使用更细粒度的锁。
-既然我们无法使用大锁去控制串行化，也无法将snapshot和log交给单个go routine去发送，那么我们换个思路，使用一把小锁去控制channel发送。
-只有小锁还不够，还需要保证这个锁是**公平锁**才行，这样就能控制发送log/snapshot的顺序了。我的思路是： 发送log/snapshot的go routine先抢到全局锁，然后会得到一个`order`，
-并递增`order`，随后释放锁。在发送log/snapshot前，会先抢小锁（这里我用的是**条件变量-sync.Cond**，判断`currentOrder`与`order` 是否一致），如果一致
-则发送log/snapshot，并递增`currentOrder`；否则就等待，直到被唤醒。
+### 如何解决
+持有锁能保证串行发送，但service只能另开 go routine 调用`Snapshot`方法；不持有锁，则raft发送log和snapshot的顺序是不确定的。
+其实，这个问题的存在有一个前提：**Raft只使用一把大锁**。仔细思考就会发现：**发送log、snapshot和service调用Snapshot方法其实并不冲突**。
+因此可以使用更细粒度的锁将这两种操作区分开。 既然我们无法使用大锁去控制串行化，也无法将snapshot和log交给单个go routine去发送，那么我们换个思路，使用一把小锁去控制channel发送。
+只有小锁还不够，还需要保证这个锁是**公平锁**才行，这样就能控制发送log/snapshot的顺序了。
+我的思路是：发送log/snapshot的go routine先抢到大锁，判断是否满足发送条件；如果满足，则会得到一个发送`order`， 同时递增`order`，随后释放大锁。在发送log/snapshot前，会先抢小锁（这里我用的是**条件变量-sync.Cond**，判断`currentOrder`与`order` 是否一致），如果一致
+则发送log/snapshot，并递增`currentOrder`；否则就等待，直到被唤醒。这样就相当于小锁继承了大锁的发送顺序，同时不影响`Snapshot`方法的执行。
 
 类似于以下伪代码：
 ```go
-
 currentOrder := 1
 nextOrder := 1
-//...
+
+// 发送log/snapshot的 go routine...
 func1 () {
-    // 发送log/snapshot的 go routine
+    
     mu.Lock()
-    // do something
+    // 检查log/snapshot是否 out-dated...
     order := nextOrder
     nextOrder++
     mu.Unlock()
@@ -176,8 +199,9 @@ func1 () {
     cond.L.Unlock()
 }
 ```
-发送log和发送snapshot是互斥的，后送的log/snapshot肯定要比前发送的log/snapshot要新，如此一来，`InstallSnapshot` 向channel发送的snapshot必定是比先前发送的log要新，
-且log和snapshot是串行发送的；所以 当service收到snapshot时 可以直接安装snapshot，而不需要调用`CondInstallSnapshot`（直接返回true）即可。
+由于`cond`的存在，发送log和发送snapshot是由`order`确定发送顺序的，后发送的log/snapshot只有比前发送的log/snapshot要新（lastIncludedIndex > index of log），才有资格获取发送`order`。
+如此一来，当service收到的snapshot必定不会是out-dated，可以直接安装snapshot，而不需要调用`CondInstallSnapshot`（直接返回true）。service调用`Snapshot`方法所带来的死锁问题也因为
+发送log/snapshot不持有大锁迎刃而解了。
 在raft类中添加几个字段，并在初始化时设置这些字段即可：
 ```go
 type Raft struct {
@@ -249,8 +273,50 @@ func (rf *Raft) applyLog() {
 	}
 }
 ```
+`InstallSnapshot`方法代码则如下：
 
-#### 最终结果
+```go
+func (rf *Raft) InstallSnapshot(args *InstallSnapshotArgs, reply *InstallSnapshotReply) error {
+	rf.mu.Lock()
+	reply.Term = rf.currentTerm
+
+	// reply false if term < currentTerm (§5.1)
+	if args.Term < rf.currentTerm {
+		return nil
+	}
+
+	// check some conditions...
+
+	// update raft state...
+	
+	messages := []ApplyMsg{
+		{
+			SnapshotValid: true,
+			Snapshot:      args.Data,
+			SnapshotIndex: args.LastIncludedIndex,
+			SnapshotTerm:  args.LastIncludedTerm,
+		},
+	}
+	rf.electionTimeout = randomElectionTimeout()
+	order := rf.nextOrder
+	rf.nextOrder++
+	rf.mu.Unlock()
+
+	rf.sendOrderCond.L.Lock()
+    for rf.sendOrder != order {
+        rf.sendOrderCond.Wait()
+    }
+    for _, message := range messages {
+        rf.applyCh <- message
+    }
+    rf.sendOrder++
+    rf.sendOrderCond.Broadcast()
+    rf.sendOrderCond.L.Unlock()
+	return
+}
+```
+
+### 总结
 使用以下测试脚本（testFull.sh)：
 ```bash
 #!/bin/bash
@@ -265,9 +331,76 @@ done
 ```bash
 ./testFull.sh > result.txt
 ```
-在测试了几个小时之后，我终止了测试，无一FAIL，且不再出现上述日志，说明该方案可行。
+在测试了几个小时之后，我终止了测试；通过查看`result.txt`发现无一FAIL，且不再出现上述日志，说明该方案可行。
+总结一下，这个死锁问题是因为**发送log/snapshot需要的锁和Snapshot的锁冲突，且发送log/snapshot是阻塞的，不能及时释放锁**导致的。 
+如果发送log/snapshot是非阻塞的或者两者需要的锁不同，则死锁问题将得到解决；而这里通过将锁细粒度化后解决了冲突，也就解决了死锁问题。
+那么是不是可以换个想法？比如发送log/snapshot使用的是非阻塞式的数据结构呢？比如基于条件变量控制的队列？
 
 
+## 谈谈leader发送heartbeat的优化
+在做lab2的时候，leader发送heartbeat的间隔以及follower的electionTimeout都是按照lab2A的指导设置的。即leader发送heartbeat消息是交给一个
+单独的go routine（以下简称为routineH）去做的，routineH每隔100ms向followers发送RPC。所有命令达成共识都需要依靠heartbeat，这样的处理逻辑在lab2测试中是不会有问题的，但会在lab3的速度测试中FAIL。
+为此，又需要在`Start`方法中提交命令时，立即向followers发送RPC，以快速达成共识。这里很自然就会想到一个问题：当`Start`方法被频繁调用时，routineH还有必要每隔100ms发送heartbeat吗？
+显然是不需要的，因为当`Start`被频繁调用时，followers自然不会超时进行选举，routineH也就不需要发送多余的RPC了，节省性能。
+
+为此，可以使用一个数组记录上次发送给followers的heartbeat的时间。每当发送RPC时，就更新这个时间；routineH判断当前时间距离上次发送时间是否大于等于100ms，如果是，则发送，否则就sleep一段时间。
+
+因此，Raft添加了如下字段：
+```go
+type Raft struct {
+	heartbeatSent []int64 // time of last sent heartbeat for other servers (millisecond)
+}
+```
+`Start`方法的代码如下：
+```go
+func (rf *Raft) Start(command interface{}) (int, int, bool) {
+	index := -1
+	term := -1
+	rf.mu.Lock()
+	defer rf.mu.Unlock()
+	isLeader := rf.role == Leader
+	if isLeader {
+        // ...
+		if rf.minMajorityVotes < 2 {
+			rf.commitIndex = index
+		} else {
+			for server := range rf.peers {
+				rf.heartbeatSent[server] = currentMilli()
+				go rf.sendHeartbeatMessage(server, term)
+			}
+		}
+	}
+	return index, term, isLeader
+}
+```
+routineH通过一个内循环判断距离上次发送heartbeat的时间，如果达到100ms则发送；否则sleep剩余时间。
+```go
+// heartbeat sends heartbeat message to server in termN
+// leaders starts a heartbeat routine for each follower when it becomes a leader in termN
+func (rf *Raft) heartbeat(server int, termN int) {
+	for true {
+		for {
+			rf.mu.Lock()
+			if rf.role != Leader || rf.currentTerm != termN {
+				rf.mu.Unlock()
+				return
+			}
+			lastSentTime := rf.heartbeatSent[server]
+			pastMills := currentMilli() - lastSentTime
+			if pastMills >= 100 {
+				rf.heartbeatSent[server] = currentMilli()
+				rf.mu.Unlock()
+				break
+			}
+			rf.mu.Unlock()
+			time.Sleep(time.Duration(100-pastMills) * time.Millisecond)
+		}
+		rf.sendHeartbeatMessage(server, termN)
+		time.Sleep(100 * time.Millisecond)
+	}
+}
+```
+这样的代码就能在`Start`被频繁调用时，避免leader发送不必要的heartbeat，降低负载。这样的优化，同样可以在leader的`ticker`方法中使用。
 
 
 
