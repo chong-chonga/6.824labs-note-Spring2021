@@ -14,13 +14,15 @@
 - ### Lab 3: Fault-tolerant Key/Value Service
   - #### 思考1：server如何知晓命令已经达成共识？
   - #### 思考2：多个client提交raft的命令得到的`commandIndex`在什么情况下会相同？
+  ### Lab 4: Sharded Key/Value Service
+  - #### [思考1：如何转移最少的shard达到最均衡的状态？](https://github.com/chong-chonga/6.824labs-note-Spring2021/blob/master/note/sharded%20kv.md)
 - ### lab的题外话
   - #### 1：server是否需要进行重复命令的检测？
   - #### 2：server如何生成唯一的分布式标识？
-  - #### 3: 代码如何更简洁？
+  - #### 3: raft如何保证持久化是原子性的？
 
 ## Maintainers
 [@Yoimbi](https://github.com/chong-chonga)
 
-## Contributing
+## Contribute
 如果你对这两个实验有自己的思考或者思路存在一定的bug等，欢迎加入讨论！

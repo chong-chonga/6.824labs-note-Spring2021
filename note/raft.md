@@ -5,8 +5,9 @@
 正如英语里的how(机制)和which(策略)一样。 下面则是我在实现Raft过程中的一些思考。
 
 ## raft应该怎样向上层的service发送log?
-阅读raft论文可知，raft 需要将 committed log 通过 channel 发送给上层的 service。
-因此，raft发送log就是在更新`commitIndex`后 ，而只有在以下两种情况中才会更新`commitIndex`：
+raft将service的操作抽象为一个个log，通过将log在集群中达成共识从而保证系统的强一致性。 而这些达成共识的log（也称为 committed log）需要发送给上层service，让service能够及时执行相关操作。
+raft论文对发送log没有详细的描述，因此选择权在于我们。 6.824课程的代码采用的是go语言中的channel，一个发送和接收都是阻塞的实现方式。
+现在有了发送的工具，接下来就是要搞懂什么时候该发送log。raft发送log就是在更新`commitIndex`后 ，而只有在以下两种情况中才会更新`commitIndex`：
 - follower 收到来自 leader `AppendEntries` RPC调用更新 `commitIndex` 时
 - leader 通过对 follower 发起`AppendEntries`或`InstallSnapshot`RPC后，自身更新 `commitIndex` 时
 
@@ -122,19 +123,26 @@ service应当持续地接收channel中的消息，也就是说，service接收ch
 在不持有锁的情况下发送log和snapshot，如果不进行限制的话，则发送是并发的。service接收到snapshot和log的顺序是不确定的，
 service可能先接收到snapshot后接收到log，而log是过时的。 然而这个问题并不会影响通过lab3的测试。
 
-假如lab3的service处理log的代码如下：
+为了验证这个假设，可以在lab3的server处理log的方法中插入下面的代码：
 ```go
-func (kv *KVServer) startApply() {
+if msg.CommandIndex != kv.commitIndex + 1 {
+    log.Println(kv.me, "receive out dated log, expected log index", kv.commitIndex+1, "but receive", msg.CommandIndex)
+}
+```
+类似于课程的测试代码，这段代码可以检查serve是否接收到 out-dated log。因此server处理channel的log/snapshot的方法如下：
+```go
+func (kv *KVServer) apply() {
 	for !kv.killed() {
 		msg := <-kv.applyCh
 		kv.mu.Lock()
 		if msg.CommandValid {
 			op := msg.Command.(Op)
-            if msg.CommandIndex < kv.commitIndex {
+            if msg.CommandIndex != kv.commitIndex + 1 {
                 log.Println(kv.me, "receive out dated log, expected log index", kv.commitIndex+1, "but receive", msg.CommandIndex)
                 kv.mu.Unlock()
                 continue
             }
+            kv.commitIndex = msg.CommandIndex
 			commandType := op.OpType
 			requestId := op.RequestId
 			if id, exists := kv.requestMap[op.ClientId]; !exists || requestId > id {
@@ -151,15 +159,17 @@ func (kv *KVServer) startApply() {
 			} else {
 				// duplicate request
 			}
-            kv.commitIndex = msg.CommandIndex
 			// ...
-		} else if msg.SnapshotValid {
+		} else if msg.SnapshotValid && kv.raft.CondInstallSnapshot(msg.SnapshotIndex, msg.SnapshotTerm, snapshot){
 			//...
+			kv.commitIndex = msg.SnapshotIndex
 		}
 		kv.mu.Unlock()
 	}
 }
 ```
+这段代码中，server在处理log/snapshot后，会保存对应的`commitIndex`，并与接收到的后一个log进行比较。如果接收到的log的`index != commitIndex+1`，说明raft发送的log不是有序的，则会打印日志消息。
+需要注意的是：**server的commitIndex初始化时应当与raft的一致**。
 测试结果如下：
 
 ![img_1.png](img_1.png)
@@ -317,7 +327,7 @@ func (rf *Raft) InstallSnapshot(args *InstallSnapshotArgs, reply *InstallSnapsho
 ```
 
 ### 总结
-使用以下测试脚本（testFull.sh)：
+使用以下测试脚本[test2A-3B.sh](https://github.com/chong-chonga/6.824labs-note-Spring2021/blob/master/test2A-3B.sh)：
 ```bash
 #!/bin/bash
 for i in {1..50} ; do
@@ -327,9 +337,9 @@ for i in {1..50} ; do
     cd ../raft
 done
 ```
-将结果导入到`result.txt`得到测试结果
+将结果导入到[result.txt](https://github.com/chong-chonga/6.824labs-note-Spring2021/blob/master/result.txt)得到测试结果
 ```bash
-./testFull.sh > result.txt
+./test2A-3B.sh > result.txt
 ```
 在测试了几个小时之后，我终止了测试；通过查看`result.txt`发现无一FAIL，且不再出现上述日志，说明该方案可行。
 总结一下，这个死锁问题是因为**发送log/snapshot需要的锁和Snapshot的锁冲突，且发送log/snapshot是阻塞的，不能及时释放锁**导致的。 
